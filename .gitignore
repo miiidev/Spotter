@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+*.pkl
+*.pt
+data/
+*.npy
+*.mp4
+train_env/
+mediapipe_env/
+.DS_Store
