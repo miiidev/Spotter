@@ -3,8 +3,10 @@ __pycache__/
 *.pkl
 *.pt
 data/
+checkpoints/
 *.npy
 *.mp4
 train_env/
 mediapipe_env/
+gradio_env/
 .DS_Store
