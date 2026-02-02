@@ -1,49 +1,72 @@
 import torch
 import torch.nn as nn
+import torchvision.models as models
 
-
-class DeepfakeLSTM(nn.Module):
+class TemporalCNN_GRU(nn.Module):
     """
-    BiLSTM-based deepfake detector.
-    Input shape:  (B, T, D)
-    Output shape: (B, 1)
+    CNN + BiGRU temporal model
+    Input: (B, T, C, H, W)
     """
-
-    def __init__(
-        self,
-        input_dim=2808,
-        hidden_dim=256,
-        num_layers=2,
-        dropout=0.3,
-    ):
+    def __init__(self, num_classes=2, hidden_size=256, freeze_backbone=True):
         super().__init__()
 
-        self.lstm = nn.LSTM(
-            input_size=input_dim,
-            hidden_size=hidden_dim,
-            num_layers=num_layers,
+        # CNN Backbone
+        backbone = models.resnet18(pretrained=True)
+        self.feature_extractor = nn.Sequential(*list(backbone.children())[:-1])
+        self.feature_dim = 512
+
+        if freeze_backbone:
+            for p in self.feature_extractor.parameters():
+                p.requires_grad = False
+
+                # Unfreeze last ResNet block for adaptation
+            for p in backbone.layer4.parameters():
+                p.requires_grad = True
+
+        # Temporal Module
+        self.temporal = nn.GRU(
+            input_size=self.feature_dim,
+            hidden_size=hidden_size,
+            num_layers=1,
             batch_first=True,
-            bidirectional=True,
-            dropout=dropout if num_layers > 1 else 0.0,
+            bidirectional=True
         )
+        self.temporal_dim = hidden_size * 2
 
+        # Classifier
         self.classifier = nn.Sequential(
-            nn.Linear(hidden_dim * 2, 128),
+            nn.Linear(self.temporal_dim, 256),
             nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(128, 1),
+            nn.Dropout(0.5),
+            nn.Linear(256, num_classes)
         )
 
-    def forward(self, x):
-        """
-        x: [B, T, D]
-        """
-        _, (h_n, _) = self.lstm(x)
+    def forward(self, x, return_temporal=False):
+        B, T, C, H, W = x.shape
 
-        # Last layer, both directions
-        h_forward = h_n[-2]
-        h_backward = h_n[-1]
-        h = torch.cat((h_forward, h_backward), dim=1)
+        # CNN per-frame
+        x = x.view(B * T, C, H, W)
+        features = self.feature_extractor(x)  # (B*T, 512, 1, 1)
+        features = features.view(B, T, self.feature_dim)
 
-        logits = self.classifier(h)
-        return logits.squeeze(1)
+        # Temporal modeling
+        temporal_out, _ = self.temporal(features)  # (B, T, 2*hidden)
+
+        # Temporal pooling (last frame)
+        pooled = temporal_out.mean(dim=1)
+
+        logits = self.classifier(pooled)
+
+        if return_temporal:
+            return logits, temporal_out
+
+        return logits
+    
+    # In model.py, inside TemporalCNN_GRU
+    def forward_single_frame(self, x):
+        # x: (B, 3, H, W)
+        B = x.shape[0]
+        features = self.feature_extractor(x)  # (B, 512, 1, 1)
+        features = features.view(B, self.feature_dim)
+        logits = self.classifier(features)
+        return logits
