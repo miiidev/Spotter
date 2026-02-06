@@ -1,13 +1,5 @@
 # Large data folders
 data/
-checkpoints/
-models/
-gradcam_videos/
-
-# Model files
-*.pth
-*.pt
-*.ckpt
 
 # Virtual environments
 train_env/
