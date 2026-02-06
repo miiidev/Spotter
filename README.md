@@ -1,1 +1,1 @@
-# VerifAI2.0
+# Spotter
