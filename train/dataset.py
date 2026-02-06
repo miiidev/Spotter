@@ -1,11 +1,9 @@
-import os
 import cv2
 import torch
 import numpy as np
 from torch.utils.data import Dataset
 from facenet_pytorch import MTCNN
 import random
-from functools import lru_cache
 import hashlib
 
 IMAGENET_MEAN = [0.485, 0.456, 0.406]

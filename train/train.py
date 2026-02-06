@@ -8,7 +8,6 @@ from torch.cuda.amp import autocast, GradScaler
 from dataset import VideoDataset
 from model import TemporalCNN_GRU
 import platform
-import numpy as np
 
 # =========================
 # CONFIG

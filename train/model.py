@@ -1,6 +1,5 @@
 import torch
 import torch.nn as nn
-from torchvision import models
 from efficientnet_pytorch import EfficientNet
 
 class TemporalCNN_GRU(nn.Module):
