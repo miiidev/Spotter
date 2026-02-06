@@ -1,12 +1,39 @@
-__pycache__/
-*.pyc
-*.pkl
-*.pt
+# Large data folders
 data/
 checkpoints/
-*.npy
-*.mp4
+models/
+gradcam_videos/
+
+# Model files
+*.pth
+*.pt
+*.ckpt
+
+# Virtual environments
 train_env/
-mediapipe_env/
 gradio_env/
+mediapipe_env/
+venv/
+env/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+train/__pycache__/
+
+# Output files
+*.mp4
+diagnostic_*.mp4
+*.avi
+
+# IDE
+.vscode/
+.idea/
+
+# OS
 .DS_Store
+Thumbs.db
+
+# Logs
+*.log

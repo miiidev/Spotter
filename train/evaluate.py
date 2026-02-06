@@ -40,7 +40,17 @@ def main():
     test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=NUM_WORKERS, pin_memory=True)
 
     model = TemporalCNN_GRU(num_classes=2, freeze_backbone=False).to(DEVICE)
-    model.load_state_dict(torch.load(MODEL_PATH, map_location=DEVICE))
+    
+    # Load checkpoint - handle both formats
+    checkpoint = torch.load(MODEL_PATH, map_location=DEVICE)
+    if 'model' in checkpoint:
+        model.load_state_dict(checkpoint['model'])
+        print(f"✅ Loaded checkpoint from epoch {checkpoint.get('epoch', 'unknown')}")
+        print(f"✅ Best validation accuracy: {checkpoint.get('best_acc', 0.0):.2f}%")
+    else:
+        model.load_state_dict(checkpoint)
+        print("✅ Loaded model weights")
+    
     model.eval()
 
     all_preds, all_labels = [], []
