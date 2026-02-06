@@ -1,7 +1,6 @@
 # inference_efficientnet.py
 import cv2
 import torch
-import torch.nn as nn
 import numpy as np
 from model import TemporalCNN_GRU
 import gradio as gr
