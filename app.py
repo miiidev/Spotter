@@ -167,9 +167,8 @@ with gr.Blocks(title="🔥 Spotter - Deepfake Detection", theme=gr.themes.Soft()
 # Launch configuration
 if __name__ == "__main__":
     demo.launch(
-        # server_name="0.0.0.0",  # Comment this out for local testing
         server_port=7860,
         share=False,
         show_error=True,
-        inbrowser=True  # Auto-opens browser!
+        inbrowser=True
     )
