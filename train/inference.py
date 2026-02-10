@@ -2,7 +2,7 @@
 import cv2
 import torch
 import numpy as np
-from model import TemporalCNN_GRU
+from train.model import TemporalCNN_GRU
 import gradio as gr
 import tempfile
 import os
@@ -12,7 +12,7 @@ from facenet_pytorch import MTCNN
 # ========================= CONFIG =========================
 NUM_FRAMES = 24
 IMG_SIZE = 224
-MODEL_PATH = "checkpoints/temporal_model_best.pth"
+MODEL_PATH = "checkpoints/spotter_v1.pth"
 FPS = 24
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")

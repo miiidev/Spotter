@@ -365,7 +365,7 @@ def main():
                 "best_f1_avg": best_f1_avg,
                 "val_metrics": val_metrics,
                 "epochs_without_improvement": epochs_without_improvement
-            }, os.path.join(CHECKPOINT_DIR, "temporal_model_best.pth"))
+            }, os.path.join(CHECKPOINT_DIR, "spotter_v1.pth"))
             print(f"\n✅ Saved best model (F1: {best_f1_avg:.2f}%, Acc: {best_acc:.2f}%)")
         else:
             epochs_without_improvement += 1
