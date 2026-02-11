@@ -1,1 +1,11 @@
-{\n  "service": {\n    "name": "Spotter",\n    "env": {\n      "PORT": "7860"\n    },\n    "build": {\n      "dockerfile": "Dockerfile"\n    }\n  }\n}
+{
+  "service": {
+    "name": "Spotter",
+    "env": {
+      "PORT": "7860"
+    },
+    "build": {
+      "dockerfile": "Dockerfile"
+    }
+  }
+}
