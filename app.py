@@ -94,7 +94,7 @@ with gr.Blocks(title="🔥 Spotter - Deepfake Detection", theme=gr.themes.Soft()
             )
             
             detect_btn = gr.Button(
-                "🔍 Detect Deepfake",
+                "🔍 Start Scan",
                 variant="primary",
                 size="lg",
                 elem_id="detect-btn"
