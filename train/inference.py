@@ -292,7 +292,7 @@ def interpolate_heatmaps_and_scores(heatmaps_sampled, fake_scores_sampled, sampl
     # Reshape back to (total_frames, h, w)
     heatmaps_all = heatmaps_all_flat.reshape(total_frames, h, w)
     
-    # Clip values to [0, 1] range (should not be necessary with proper boundary handling, but as safety)
+    # Clip values to [0, 1] range (should not be necessary with proper boundary handling, for safety)
     fake_scores_all = np.clip(fake_scores_all, 0, 1)
     heatmaps_all = np.clip(heatmaps_all, 0, 1)
     
@@ -509,7 +509,8 @@ def predict_with_diagnostics(video_path):
         "label": label,
         "confidence": confidence,
         "diagnostic_video": diag_video,
-        "frame_scores": fake_scores_all
+        "frame_scores": fake_scores_sampled,  # Actual model predictions
+        "interpolated_frame_scores": fake_scores_all  # Interpolated scores for visualization
     }
 
 # ========================= Gradio wrapper =========================
