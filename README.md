@@ -1,6 +1,6 @@
 <div align="center">
 
-# 🔥 Spotter
+# 🔍 Spotter
 
 **AI-Powered Deepfake Detection with Artifact Visualization**
 
