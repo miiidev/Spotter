@@ -8,6 +8,7 @@ import tempfile
 import os
 import uuid
 from facenet_pytorch import MTCNN
+from scipy.interpolate import interp1d
 
 # ========================= CONFIG =========================
 NUM_FRAMES = 24
@@ -85,35 +86,60 @@ def detect_and_crop_face(frame_rgb):
 
 # ========================= Frame extraction =========================
 def extract_frames(video_path, num_frames=NUM_FRAMES, size=IMG_SIZE):
+    """
+    Extract ALL frames from video and sample num_frames for analysis.
+    
+    Returns:
+        small_frames_sampled: Face-cropped frames for analysis (num_frames)
+        full_frames_all: All full frames from video
+        face_boxes_all: Face boxes for all frames
+        sampled_indices: Indices of frames selected for analysis
+    """
     cap = cv2.VideoCapture(video_path)
-
-    small_frames, full_frames, face_boxes = [], [], []
 
     if not cap.isOpened():
         black = np.zeros((size, size, 3), dtype=np.uint8)
-        return np.stack([black] * num_frames), np.stack([black] * num_frames), [None] * num_frames
+        return (np.stack([black] * num_frames), np.stack([black] * num_frames), 
+                [None] * num_frames, np.arange(num_frames))
 
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    indices = np.linspace(0, max(total_frames - 1, 0), num_frames).astype(int)
-
-    for idx in indices:
-        cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
+    
+    # Extract ALL frames
+    all_full_frames = []
+    all_face_boxes = []
+    
+    frame_idx = 0
+    while True:
         ret, frame = cap.read()
-
         if not ret:
-            frame = np.zeros((size, size, 3), dtype=np.uint8)
-
+            break
+            
         frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        _, face_box = detect_and_crop_face(frame_rgb)
         
-        # Detect and crop face
-        face_cropped, face_box = detect_and_crop_face(frame_rgb)
-        
-        full_frames.append(frame_rgb)
-        small_frames.append(face_cropped)
-        face_boxes.append(face_box)
-
+        all_full_frames.append(frame_rgb)
+        all_face_boxes.append(face_box)
+        frame_idx += 1
+    
     cap.release()
-    return np.stack(small_frames), np.stack(full_frames), face_boxes
+    
+    # If no frames extracted, return dummy data
+    if len(all_full_frames) == 0:
+        black = np.zeros((size, size, 3), dtype=np.uint8)
+        return (np.stack([black] * num_frames), np.stack([black] * num_frames), 
+                [None] * num_frames, np.arange(num_frames))
+    
+    # Sample num_frames uniformly for analysis
+    sampled_indices = np.linspace(0, len(all_full_frames) - 1, num_frames).astype(int)
+    
+    # Extract face-cropped versions of sampled frames
+    small_frames_sampled = []
+    for idx in sampled_indices:
+        face_cropped, _ = detect_and_crop_face(all_full_frames[idx])
+        small_frames_sampled.append(face_cropped)
+    
+    return (np.stack(small_frames_sampled), np.stack(all_full_frames), 
+            all_face_boxes, sampled_indices)
 
 # ========================= Temporal-Aware Grad-CAM =========================
 class TemporalGradCAM:
@@ -230,16 +256,55 @@ def aggregate_frame_scores(fake_scores, threshold=0.5):
     else:
         return "REAL", float(1 - mean_score)
 
+# ------------------------- Interpolate heatmaps and scores -------------------------
+def interpolate_heatmaps_and_scores(heatmaps_sampled, fake_scores_sampled, sampled_indices, total_frames):
+    """
+    Interpolate heatmaps and fake scores for all frames using the sampled frames.
+    
+    Args:
+        heatmaps_sampled: (num_sampled, H, W) - heatmaps for sampled frames
+        fake_scores_sampled: (num_sampled,) - fake scores for sampled frames
+        sampled_indices: (num_sampled,) - indices of sampled frames
+        total_frames: int - total number of frames in video
+        
+    Returns:
+        heatmaps_all: (total_frames, H, W) - interpolated heatmaps for all frames
+        fake_scores_all: (total_frames,) - interpolated scores for all frames
+    """
+    # Interpolate fake scores using linear interpolation
+    score_interp = interp1d(sampled_indices, fake_scores_sampled, 
+                           kind='linear', fill_value='extrapolate')
+    fake_scores_all = score_interp(np.arange(total_frames))
+    
+    # Interpolate heatmaps - do this per-pixel
+    h, w = heatmaps_sampled.shape[1:]
+    heatmaps_all = np.zeros((total_frames, h, w), dtype=np.float32)
+    
+    # For each pixel position, interpolate across frames
+    for i in range(h):
+        for j in range(w):
+            pixel_values = heatmaps_sampled[:, i, j]
+            pixel_interp = interp1d(sampled_indices, pixel_values, 
+                                   kind='linear', fill_value='extrapolate')
+            heatmaps_all[:, i, j] = pixel_interp(np.arange(total_frames))
+    
+    # Clip values to [0, 1] range (interpolation may produce out-of-range values)
+    fake_scores_all = np.clip(fake_scores_all, 0, 1)
+    heatmaps_all = np.clip(heatmaps_all, 0, 1)
+    
+    return heatmaps_all, fake_scores_all
+
 # ========================= Diagnostics =========================
 def frame_level_diagnostics(video_path):
     """
     Extract frames and compute temporal-aware heatmaps.
+    Returns all frames with interpolated heatmaps and scores.
     """
-    small_frames, full_frames, face_boxes = extract_frames(video_path)
+    small_frames_sampled, full_frames_all, face_boxes_all, sampled_indices = extract_frames(video_path)
     
-    # Prepare tensor (normalize with ImageNet stats)
+    # Prepare tensor (normalize with ImageNet stats) - only for sampled frames
     frames_tensor = torch.from_numpy(
-        small_frames.astype(np.float32) / 255.0
+        small_frames_sampled.astype(np.float32) / 255.0
     ).permute(0, 3, 1, 2).unsqueeze(0).to(DEVICE)  # (1, T, C, H, W)
     
     # Normalize
@@ -247,15 +312,16 @@ def frame_level_diagnostics(video_path):
     std = torch.tensor([0.229, 0.224, 0.225], device=DEVICE).view(1, 1, 3, 1, 1)
     frames_tensor = (frames_tensor - mean) / std
     
-    # Generate heatmaps using temporal model
+    # Generate heatmaps using temporal model - only for sampled frames
     # Predict class first
     with torch.no_grad():
         logits = model(frames_tensor)
         pred_class = logits.argmax(dim=1).item()
     
-    heatmaps, fake_scores = gradcam.generate_heatmaps(frames_tensor, target_class=pred_class)
+    heatmaps_sampled, fake_scores_sampled = gradcam.generate_heatmaps(frames_tensor, target_class=pred_class)
     
-    return full_frames, small_frames, fake_scores, heatmaps, face_boxes
+    return (full_frames_all, small_frames_sampled, fake_scores_sampled, 
+            heatmaps_sampled, face_boxes_all, sampled_indices)
 
 # ========================= Video writer =========================
 def create_pixelated_heatmap(heatmap, grid_size=12):
@@ -320,6 +386,17 @@ def overlay_heatmap(frame_bgr, heatmap, alpha, threshold=0.3, grid_size=12):
     return result
 
 def generate_diagnostic_video(full_frames, face_frames, fake_scores, heatmaps, face_boxes, fps=FPS):
+    """
+    Generate diagnostic video with all frames and interpolated heatmaps/scores.
+    
+    Args:
+        full_frames: All frames from the video
+        face_frames: Sampled face-cropped frames (not used in output, kept for compatibility)
+        fake_scores: Interpolated fake scores for all frames
+        heatmaps: Interpolated heatmaps for all frames
+        face_boxes: Face boxes for all frames
+        fps: Output video frame rate
+    """
     out_path = os.path.join(
         tempfile.gettempdir(),
         f"diagnostic_{uuid.uuid4().hex}.mp4"
@@ -333,8 +410,8 @@ def generate_diagnostic_video(full_frames, face_frames, fake_scores, heatmaps, f
         (w, h)
     )
 
-    for frame_idx, (full_frame, face_frame, score, heatmap, face_box) in enumerate(
-        zip(full_frames, face_frames, fake_scores, heatmaps, face_boxes)
+    for frame_idx, (full_frame, score, heatmap, face_box) in enumerate(
+        zip(full_frames, fake_scores, heatmaps, face_boxes)
     ):
         frame_bgr = cv2.cvtColor(full_frame, cv2.COLOR_RGB2BGR)
         
@@ -405,16 +482,30 @@ def generate_diagnostic_video(full_frames, face_frames, fake_scores, heatmaps, f
 
 # ========================= Prediction =========================
 def predict_with_diagnostics(video_path):
-    full_frames, face_frames, fake_scores, heatmaps, face_boxes = frame_level_diagnostics(video_path)
-
-    label, confidence = aggregate_frame_scores(fake_scores)
-    diag_video = generate_diagnostic_video(full_frames, face_frames, fake_scores, heatmaps, face_boxes)
+    # Get all frames and sampled analysis results
+    (full_frames_all, face_frames_sampled, fake_scores_sampled, 
+     heatmaps_sampled, face_boxes_all, sampled_indices) = frame_level_diagnostics(video_path)
+    
+    # Interpolate heatmaps and scores for all frames
+    total_frames = len(full_frames_all)
+    heatmaps_all, fake_scores_all = interpolate_heatmaps_and_scores(
+        heatmaps_sampled, fake_scores_sampled, sampled_indices, total_frames
+    )
+    
+    # Aggregate using sampled scores (not interpolated) for overall prediction
+    label, confidence = aggregate_frame_scores(fake_scores_sampled)
+    
+    # Generate diagnostic video with all frames and interpolated data
+    diag_video = generate_diagnostic_video(
+        full_frames_all, face_frames_sampled, fake_scores_all, 
+        heatmaps_all, face_boxes_all
+    )
 
     return {
         "label": label,
         "confidence": confidence,
         "diagnostic_video": diag_video,
-        "frame_scores": fake_scores
+        "frame_scores": fake_scores_all
     }
 
 # ========================= Gradio wrapper =========================
