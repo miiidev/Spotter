@@ -272,23 +272,27 @@ def interpolate_heatmaps_and_scores(heatmaps_sampled, fake_scores_sampled, sampl
         fake_scores_all: (total_frames,) - interpolated scores for all frames
     """
     # Interpolate fake scores using linear interpolation
+    # Use bounds_error=False with fill_value to handle edge cases explicitly
     score_interp = interp1d(sampled_indices, fake_scores_sampled, 
-                           kind='linear', fill_value='extrapolate')
+                           kind='linear', bounds_error=False,
+                           fill_value=(fake_scores_sampled[0], fake_scores_sampled[-1]))
     fake_scores_all = score_interp(np.arange(total_frames))
     
-    # Interpolate heatmaps - do this per-pixel
+    # Interpolate heatmaps efficiently using vectorized approach
+    # Reshape to (num_sampled, h*w) for vectorized interpolation
     h, w = heatmaps_sampled.shape[1:]
-    heatmaps_all = np.zeros((total_frames, h, w), dtype=np.float32)
+    heatmaps_flat = heatmaps_sampled.reshape(len(sampled_indices), -1)
     
-    # For each pixel position, interpolate across frames
-    for i in range(h):
-        for j in range(w):
-            pixel_values = heatmaps_sampled[:, i, j]
-            pixel_interp = interp1d(sampled_indices, pixel_values, 
-                                   kind='linear', fill_value='extrapolate')
-            heatmaps_all[:, i, j] = pixel_interp(np.arange(total_frames))
+    # Interpolate all pixels at once
+    heatmap_interp = interp1d(sampled_indices, heatmaps_flat, axis=0,
+                             kind='linear', bounds_error=False,
+                             fill_value=(heatmaps_flat[0], heatmaps_flat[-1]))
+    heatmaps_all_flat = heatmap_interp(np.arange(total_frames))
     
-    # Clip values to [0, 1] range (interpolation may produce out-of-range values)
+    # Reshape back to (total_frames, h, w)
+    heatmaps_all = heatmaps_all_flat.reshape(total_frames, h, w)
+    
+    # Clip values to [0, 1] range (should not be necessary with proper boundary handling, but as safety)
     fake_scores_all = np.clip(fake_scores_all, 0, 1)
     heatmaps_all = np.clip(heatmaps_all, 0, 1)
     
