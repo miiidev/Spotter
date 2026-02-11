@@ -4,7 +4,7 @@
 
 **AI-Powered Deepfake Detection with Artifact Visualization**
 
-![Spotter Banner](images/banner.png)
+![Spotter Banner](banner.png)
 [![Python](https://img.shields.io/badge/Python-3.10+-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org/)
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.10-EE4C2C?style=for-the-badge&logo=pytorch&logoColor=white)](https://pytorch.org/)
 [![Gradio](https://img.shields.io/badge/Gradio-6.5-F97316?style=for-the-badge&logo=gradio&logoColor=white)](https://gradio.app/)
