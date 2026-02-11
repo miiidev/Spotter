@@ -1,8 +1,0 @@
-.git
-.gitignore
-.vscode
-__pycache__/
-*.pyc
-.pytest_cache/
-.DS_Store
-checkpoints/
