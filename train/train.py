@@ -15,9 +15,18 @@ import platform
 DATA_ROOT = "data/processed"
 CHECKPOINT_DIR = "checkpoints"
 CHECKPOINT_PATH = os.path.join(CHECKPOINT_DIR, "temporal_model_last.pth")
-BATCH_SIZE = 8  # Reduced from 16 for more stable training
+
+# Model architecture config
+USE_EFFICIENTNET_B3 = False  # Set to True to use B3 instead of B0
+USE_MULTISCALE = False       # Set to True to use multi-scale feature extraction
+BACKBONE = 'efficientnet-b3' if USE_EFFICIENTNET_B3 else 'efficientnet-b0'
+IMG_SIZE = 300 if USE_EFFICIENTNET_B3 else 224
+
+# Training config - adjusted for B3
+BATCH_SIZE = 4 if USE_EFFICIENTNET_B3 else 8  # Reduced for B3 due to memory
+GRADIENT_ACCUMULATION_STEPS = 2 if USE_EFFICIENTNET_B3 else 1  # Effective batch size of 8 for B3
 EPOCHS = 25  # Increased from 15
-LR = 1e-4  # Reduced from 3e-4 for more stable learning
+LR = 5e-5 if USE_EFFICIENTNET_B3 else 1e-4  # Lower LR for B3 fine-tuning
 NUM_WORKERS = 4
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 USE_COMPILE = True  # torch.compile (disabled on Windows automatically)
@@ -63,36 +72,43 @@ class FocalLoss(nn.Module):
 # =========================
 # TRAIN / EVAL
 # =========================
-def train_one_epoch(model, loader, optimizer, criterion, scaler, epoch):
+def train_one_epoch(model, loader, optimizer, criterion, scaler, epoch, gradient_accumulation_steps=1):
     model.train()
     total_loss = 0.0
     correct = 0
     total = 0
     
     pbar = tqdm(loader, desc=f"Epoch {epoch} [Train]", leave=False)
-    for videos, labels in pbar:
+    optimizer.zero_grad()
+    
+    for batch_idx, (videos, labels) in enumerate(pbar):
         videos, labels = videos.to(DEVICE), labels.to(DEVICE)
-        optimizer.zero_grad()
         
         with autocast():
             outputs = model(videos)
             loss = criterion(outputs, labels)
+            # Scale loss for gradient accumulation
+            loss = loss / gradient_accumulation_steps
         
         scaler.scale(loss).backward()
-        # Gradient clipping for stability
-        scaler.unscale_(optimizer)
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-        scaler.step(optimizer)
-        scaler.update()
         
-        total_loss += loss.item()
+        # Update weights every gradient_accumulation_steps
+        if (batch_idx + 1) % gradient_accumulation_steps == 0:
+            # Gradient clipping for stability
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            scaler.step(optimizer)
+            scaler.update()
+            optimizer.zero_grad()
+        
+        total_loss += loss.item() * gradient_accumulation_steps
         preds = outputs.argmax(dim=1)
         correct += (preds == labels).sum().item()
         total += labels.size(0)
         
         # Update progress bar
         pbar.set_postfix({
-            'loss': f'{loss.item():.4f}',
+            'loss': f'{loss.item() * gradient_accumulation_steps:.4f}',
             'acc': f'{100.0 * correct / total:.2f}%'
         })
     
@@ -187,19 +203,19 @@ def main():
         raise RuntimeError("❌ Empty train or val split")
 
     # Datasets & loaders
-    print("\n🔄 Creating datasets with face detection...")
+    print(f"\n🔄 Creating datasets with face detection (size={IMG_SIZE})...")
     train_dataset = VideoDataset(
         train_videos, train_labels, 
         split="train", 
         augment=True, 
-        size=224,  # Increased from 160 for better face details
+        size=IMG_SIZE,  # Use configured IMG_SIZE (224 for B0, 300 for B3)
         num_frames=24  # Reduced from 32 for speed (Phase 1 optimization!)
     )
     val_dataset = VideoDataset(
         val_videos, val_labels, 
         split="val", 
         augment=False, 
-        size=224, 
+        size=IMG_SIZE,  # Use configured IMG_SIZE
         num_frames=24  # Reduced from 32 for speed
     )
     
@@ -227,12 +243,20 @@ def main():
     )
 
     # Model
-    print("\n🧠 Initializing model...")
+    print(f"\n🧠 Initializing model ({BACKBONE})...")
     model = TemporalCNN_GRU(
         num_classes=2, 
         hidden_size=512, 
-        freeze_backbone=True  # Start with frozen backbone
+        freeze_backbone=True,  # Start with frozen backbone
+        backbone=BACKBONE,
+        use_multiscale=USE_MULTISCALE
     ).to(DEVICE)
+    
+    print(f"  Backbone: {BACKBONE}")
+    print(f"  Multi-scale: {'ENABLED' if USE_MULTISCALE else 'DISABLED'}")
+    print(f"  Feature dimension: {model.feature_dim}")
+    print(f"  Input size: {IMG_SIZE}x{IMG_SIZE}")
+    print(f"  Spatial attention: ENABLED")
     
     if USE_COMPILE and hasattr(torch, "compile") and platform.system() != "Windows":
         model = torch.compile(model)
@@ -319,7 +343,8 @@ def main():
         
         # Train
         train_loss, train_acc = train_one_epoch(
-            model, train_loader, optimizer, criterion, scaler, epoch
+            model, train_loader, optimizer, criterion, scaler, epoch,
+            gradient_accumulation_steps=GRADIENT_ACCUMULATION_STEPS
         )
         
         # Validate
