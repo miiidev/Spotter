@@ -161,7 +161,7 @@ print(f"Diagnostic video saved to: {diagnostic_video_path}")
 Spotter uses a two-stage architecture combining spatial feature extraction with temporal sequence modeling:
 
 ```
-Video Input (24 frames @ 224×224)
+Video Input (24 frames @ 224×224 or 300×300)
         │
         ▼
 ┌─────────────────────┐
@@ -170,8 +170,16 @@ Video Input (24 frames @ 224×224)
           │
           ▼
 ┌─────────────────────┐
-│  EfficientNet-B0      │  ← Spatial features (1280-dim)
-│  (ImageNet pretrained) │     Last 3 blocks fine-tuned
+│  EfficientNet-B0/B3   │  ← Spatial features
+│  (ImageNet pretrained) │     B0: 1280-dim, B3: 1536-dim
+│  + Multi-Scale FPN    │     Optional multi-scale extraction
+└─────────┬───────────┘
+          │
+          ▼
+┌─────────────────────┐
+│  Spatial Attention    │  ← Focus on artifact regions
+│  Module (Channel +    │     (mouth, eyes, boundaries)
+│  Spatial attention)   │
 └─────────┬───────────┘
           │
           ▼
@@ -192,18 +200,20 @@ Video Input (24 frames @ 224×224)
 └─────────┬───────────┘
           │
           ▼
-    Real / Fake + Grad-CAM Heatmap
+    Real / Fake + Multi-Scale Grad-CAM Heatmap
 ```
 
 ### Key Components
 
 | Component | Details |
 |-----------|---------|
-| **Backbone** | EfficientNet-B0 (1280-dim features, ImageNet pretrained) |
+| **Backbone** | EfficientNet-B0 (1280-dim) or B3 (1536-dim), ImageNet pretrained |
+| **Multi-Scale FPN** | Optional feature pyramid for better spatial resolution (28×28 vs 7×7) |
+| **Spatial Attention** | Channel + Spatial attention to focus on deepfake-prone regions |
 | **Temporal** | Bidirectional GRU (2 layers, 512 hidden units, 0.3 dropout) |
 | **Pooling** | Mean + Max temporal pooling (2048-dim combined) |
 | **Classifier** | 3-layer MLP with ReLU & Dropout |
-| **Visualization** | Temporal Grad-CAM with pixelated heatmaps (6–16px grid) |
+| **Visualization** | Multi-scale Grad-CAM with adaptive pixelated heatmaps (4–16px grid) |
 
 ---
 
@@ -277,17 +287,39 @@ python train.py
 
 #### Training Configuration
 
+**EfficientNet-B0 (Default):**
 | Parameter | Value |
 |-----------|-------|
 | Batch size | 8 |
-| Epochs | 25 |
+| Input size | 224×224 |
 | Learning rate | 1e-4 |
+| Gradient accumulation | 1 |
+
+**EfficientNet-B3 (Enhanced):**
+| Parameter | Value |
+|-----------|-------|
+| Batch size | 4 |
+| Input size | 300×300 |
+| Learning rate | 5e-5 |
+| Gradient accumulation | 2 (effective batch size: 8) |
+
+**Common Settings:**
+| Parameter | Value |
+|-----------|-------|
+| Epochs | 25 |
 | Optimizer | AdamW (weight decay 1e-4) |
 | Scheduler | Cosine Annealing with Warm Restarts (T₀=5) |
 | Loss | Focal Loss (γ=2.0, class-weighted) |
 | Early stopping | Patience = 7, min Δ = 0.5% |
 | Mixed precision | ✅ AMP with GradScaler |
 | Backbone freeze | Last 3 EfficientNet blocks + conv head unfrozen |
+| Spatial attention | ✅ Always enabled |
+
+To use EfficientNet-B3 with multi-scale features, edit `train/train.py`:
+```python
+USE_EFFICIENTNET_B3 = True  # Set to True for B3
+USE_MULTISCALE = True       # Set to True for multi-scale FPN
+```
 
 #### Dataset Optimizations
 
@@ -321,10 +353,15 @@ Outputs accuracy, confusion matrix, and per-class classification report.
 
 ## ⚙️ Technical Details
 
-- **Input**: 24 frames per video, resized to 224×224, ImageNet-normalized
+- **Input**: 24 frames per video, resized to 224×224 (B0) or 300×300 (B3), ImageNet-normalized
+- **Backbone Options**: 
+  - EfficientNet-B0: 1280 features, 7×7 resolution, ~17M params
+  - EfficientNet-B3: 1536 features, higher resolution, ~25M params
+- **Multi-Scale FPN**: Optional 3-scale feature pyramid (fine: 28×28, mid: 14×14, semantic: 7×7)
+- **Spatial Attention**: Channel + spatial attention for artifact localization
 - **Face Detection**: MTCNN with 40px margin, confidence-based selection
-- **Grad-CAM**: Temporal-aware, targets EfficientNet-B0's final conv layer
-- **Heatmap Style**: Pixelated grid (6–16px), intensity = manipulation confidence
+- **Grad-CAM**: Multi-scale temporal-aware Grad-CAM with weighted fusion (fine: 0.3, mid: 0.3, semantic: 0.4)
+- **Heatmap Style**: Adaptive pixelated grid (4–16px), intensity = manipulation confidence
 - **Score Aggregation**: Frame-level fake scores interpolated to full video duration
 - **GPU Acceleration**: CUDA-accelerated when available, graceful CPU fallback
 
