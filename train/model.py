@@ -43,9 +43,9 @@ class MultiScaleFeatureExtractor(nn.Module):
     
     def forward(self, x):
         # x: (B*T, 3, H, W) where H,W can be 224 or 300
-        feat_low = self.block3(x)    # (B*T, 40 or 48, 28, 28) - actually depends on input size
-        feat_mid = self.block5(feat_low)  # (B*T, 112 or 136, 14, 14)
-        feat_high = self.block7(feat_mid)  # (B*T, 1280 or 1536, 7, 7)
+        feat_low = self.block3(x)    # (B*T, C_low, H_low, W_low) - depends on backbone
+        feat_mid = self.block5(feat_low)  # (B*T, C_mid, H_mid, W_mid)
+        feat_high = self.block7(feat_mid)  # (B*T, C_high, H_high, W_high)
         
         # Get the actual spatial dimensions (they may vary with input size)
         target_h, target_w = feat_low.shape[2], feat_low.shape[3]
@@ -120,10 +120,10 @@ class TemporalCNN_GRU(nn.Module):
         self.use_multiscale = use_multiscale
         
         # Feature dimension based on backbone
+        # Note: Only B0 and B3 are currently tested and supported
         backbone_dims = {
             'efficientnet-b0': 1280,
             'efficientnet-b3': 1536,
-            'efficientnet-b4': 1792,
         }
         self.feature_dim = backbone_dims.get(backbone, 1280)
         
@@ -215,33 +215,26 @@ class TemporalCNN_GRU(nn.Module):
         
         # Extract features (multiscale or standard)
         if self.use_multiscale:
-            features, feat_high = self.feature_extractor(x)  # (B*T, feature_dim, 1, 1), (B*T, feature_dim, 7, 7)
+            features, feat_high = self.feature_extractor(x)  # (B*T, feature_dim, 1, 1), (B*T, feature_dim, H, W)
             features_spatial = feat_high  # Use high-level features for spatial attention
         else:
-            features = self.feature_extractor(x)  # (B*T, feature_dim, 1, 1)
-            # For standard extraction, we need to get features before pooling
-            # Re-extract features before pooling for spatial attention
-            x_temp = x
-            for layer in list(self.feature_extractor)[:-1]:  # All except AdaptiveAvgPool2d
-                x_temp = layer(x_temp)
-            features_spatial = x_temp  # (B*T, feature_dim, H, W)
+            # For standard extraction, extract features before final pooling
+            # to enable spatial attention
+            features_spatial = x
+            for i, layer in enumerate(self.feature_extractor):
+                if isinstance(layer, nn.AdaptiveAvgPool2d):
+                    # Stop before pooling layer - we need spatial features
+                    break
+                features_spatial = layer(features_spatial)
+            # features_spatial now has shape (B*T, feature_dim, H, W)
         
-        # Apply spatial attention
+        # Apply spatial attention on spatial features
         features_attended, spatial_attn_maps = self.spatial_attention(features_spatial)
         
-        # Pool attended features if not already pooled
-        if features_attended.dim() == 4 and features_attended.shape[2] > 1:
-            features_pooled = nn.AdaptiveAvgPool2d(1)(features_attended)
-        else:
-            features_pooled = features_attended
+        # Pool attended features
+        features_pooled = nn.AdaptiveAvgPool2d(1)(features_attended)  # (B*T, feature_dim, 1, 1)
         
-        # If using multiscale, combine with original features
-        if self.use_multiscale:
-            features_final = features_pooled  # Already fused
-        else:
-            features_final = features_pooled
-        
-        features_final = features_final.view(B, T, self.feature_dim)  # (B, T, feature_dim)
+        features_final = features_pooled.view(B, T, self.feature_dim)  # (B, T, feature_dim)
 
         # Temporal modeling with GRU
         temporal_out, _ = self.temporal(features_final)  # (B, T, temporal_dim)

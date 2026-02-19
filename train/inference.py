@@ -35,6 +35,8 @@ except Exception as e:
     model = TemporalCNN_GRU(num_classes=2, backbone='efficientnet-b0', use_multiscale=False)
     checkpoint = torch.load(MODEL_PATH, map_location=DEVICE)
     if 'model' in checkpoint:
+        # Use strict=False for backward compatibility with older checkpoints
+        # that may not have spatial attention or multi-scale components
         model.load_state_dict(checkpoint['model'], strict=False)
         print(f"✅ Loaded EfficientNet-B0 checkpoint from epoch {checkpoint.get('epoch', 'unknown')}")
     else:
