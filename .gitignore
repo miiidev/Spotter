@@ -15,9 +15,7 @@ __pycache__/
 train/__pycache__/
 
 # Output files
-*.mp4
 diagnostic_*.mp4
-*.avi
 
 # IDE
 .vscode/
@@ -29,3 +27,6 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Temp uploads
+spotter_uploads/
