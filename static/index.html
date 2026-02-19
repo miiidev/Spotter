@@ -1,0 +1,519 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Spotter - Deepfake Detection</title>
+    <style>
+        *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+        :root {
+            --background: #09090b;
+            --foreground: #fafafa;
+            --card: #0a0a0c;
+            --card-border: #27272a;
+            --muted: #a1a1aa;
+            --muted-bg: #18181b;
+            --primary: #f43f5e;
+            --primary-hover: #e11d48;
+            --success: #22c55e;
+            --radius: 12px;
+            --radius-sm: 8px;
+            --font: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Inter', sans-serif;
+        }
+
+        body {
+            font-family: var(--font);
+            background: var(--background);
+            color: var(--foreground);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            padding: 2rem 1rem;
+            -webkit-font-smoothing: antialiased;
+        }
+
+        .container { width: 100%; max-width: 800px; }
+
+        /* ─── Header ─── */
+        .header { text-align: center; margin-bottom: 2rem; }
+        .header .logo {
+            display: inline-flex; align-items: center; gap: 0.5rem;
+            font-size: 1.75rem; font-weight: 700; letter-spacing: -0.025em;
+            margin-bottom: 0.5rem;
+        }
+        .header .description { color: var(--muted); font-size: 0.95rem; }
+
+        /* ─── Card ─── */
+        .card {
+            background: var(--card); border: 1px solid var(--card-border);
+            border-radius: var(--radius); padding: 1.5rem; margin-bottom: 1rem;
+        }
+        .card-header { margin-bottom: 1rem; }
+        .card-title {
+            font-size: 0.875rem; font-weight: 500; color: var(--muted);
+            text-transform: uppercase; letter-spacing: 0.05em;
+        }
+
+        /* ─── Upload Zone ─── */
+        .upload-zone {
+            border: 2px dashed var(--card-border); border-radius: var(--radius);
+            padding: 3rem 2rem; text-align: center; cursor: pointer;
+            transition: all 0.2s ease;
+        }
+        .upload-zone:hover, .upload-zone.dragover {
+            border-color: var(--primary); background: rgba(244,63,94,0.04);
+        }
+        .upload-zone.has-file {
+            border-color: var(--success); border-style: solid; padding: 1.25rem;
+        }
+        .upload-zone .upload-icon { font-size: 2.5rem; margin-bottom: 0.75rem; opacity: 0.7; }
+        .upload-zone .upload-text { color: var(--muted); font-size: 0.9rem; line-height: 1.6; }
+        .upload-zone .upload-text strong { color: var(--foreground); }
+        .upload-zone .file-name {
+            display: flex; align-items: center; justify-content: center;
+            gap: 0.5rem; font-size: 0.9rem;
+        }
+        .upload-zone .file-name .check { color: var(--success); }
+        input[type="file"] { display: none; }
+
+        /* ─── Divider ─── */
+        .divider {
+            display: flex; align-items: center; gap: 1rem;
+            margin: 1.25rem 0; color: var(--muted); font-size: 0.8rem;
+            text-transform: uppercase; letter-spacing: 0.05em;
+        }
+        .divider::before, .divider::after {
+            content: ''; flex: 1; height: 1px; background: var(--card-border);
+        }
+
+        /* ─── Sample Grid ─── */
+        .samples-grid {
+            display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+            gap: 0.75rem;
+        }
+        .sample-card {
+            background: var(--muted-bg); border: 1px solid var(--card-border);
+            border-radius: var(--radius-sm); padding: 0.75rem;
+            cursor: pointer; transition: all 0.15s ease;
+            display: flex; align-items: center; gap: 0.75rem;
+        }
+        .sample-card:hover {
+            border-color: var(--primary); background: rgba(244,63,94,0.04);
+        }
+        .sample-card.selected {
+            border-color: var(--primary); background: rgba(244,63,94,0.08);
+        }
+        .sample-card .sample-icon { font-size: 1.5rem; flex-shrink: 0; }
+        .sample-card .sample-info { min-width: 0; }
+        .sample-card .sample-name {
+            font-size: 0.85rem; font-weight: 500;
+            white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+        }
+        .sample-card .sample-tag {
+            font-size: 0.7rem; color: var(--muted); margin-top: 0.15rem;
+        }
+
+        /* ─── Button ─── */
+        .btn {
+            width: 100%; padding: 0.75rem 1.5rem; border: none;
+            border-radius: var(--radius-sm); font-family: var(--font);
+            font-size: 0.9rem; font-weight: 600; cursor: pointer;
+            transition: all 0.15s ease; display: inline-flex;
+            align-items: center; justify-content: center; gap: 0.5rem;
+        }
+        .btn-primary { background: var(--primary); color: white; }
+        .btn-primary:hover:not(:disabled) { background: var(--primary-hover); }
+        .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+        /* ─── Loading ─── */
+        .loading-overlay {
+            display: none; flex-direction: column; align-items: center; padding: 3rem;
+        }
+        .loading-overlay.active { display: flex; }
+        .spinner {
+            width: 32px; height: 32px; border: 3px solid var(--card-border);
+            border-top-color: var(--primary); border-radius: 50%;
+            animation: spin 0.7s linear infinite; margin-bottom: 1rem;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        .loading-text { color: var(--muted); font-size: 0.875rem; }
+
+        /* ─── Results ─── */
+        .results-section { display: none; }
+        .results-section.active { display: block; }
+        .results-grid {
+            display: grid; grid-template-columns: 1fr 1fr;
+            gap: 0.75rem; margin-bottom: 1rem;
+        }
+        .stat-card {
+            background: var(--muted-bg); border: 1px solid var(--card-border);
+            border-radius: var(--radius-sm); padding: 1rem; text-align: center;
+        }
+        .stat-label {
+            font-size: 0.75rem; color: var(--muted);
+            text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.4rem;
+        }
+        .stat-value { font-size: 1.5rem; font-weight: 700; }
+        .stat-value.fake { color: var(--primary); }
+        .stat-value.real { color: var(--success); }
+
+        /* ─── Player ─── */
+        .player-wrapper {
+            position: relative; border-radius: var(--radius);
+            overflow: hidden; background: #000;
+        }
+        .player-wrapper video { width: 100%; display: block; }
+        #diagnostic-video {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            pointer-events: none; transition: opacity 0.2s ease;
+        }
+
+        /* ─── Toggle ─── */
+        .toggle-bar {
+            display: flex; align-items: center; justify-content: space-between;
+            background: var(--muted-bg); border: 1px solid var(--card-border);
+            border-radius: var(--radius-sm); padding: 0.625rem 1rem;
+        }
+        .toggle-label {
+            font-size: 0.85rem; font-weight: 500;
+            display: flex; align-items: center; gap: 0.4rem;
+        }
+        .toggle-switch {
+            position: relative; width: 44px; height: 24px;
+            background: var(--card-border); border-radius: 12px;
+            cursor: pointer; transition: background 0.2s; border: none; padding: 0;
+        }
+        .toggle-switch.active { background: var(--primary); }
+        .toggle-switch .knob {
+            position: absolute; top: 3px; left: 3px;
+            width: 18px; height: 18px; background: white;
+            border-radius: 50%; transition: transform 0.2s;
+        }
+        .toggle-switch.active .knob { transform: translateX(20px); }
+
+        /* ─── Accordion ─── */
+        .accordion {
+            border: 1px solid var(--card-border);
+            border-radius: var(--radius-sm); overflow: hidden; margin-bottom: 1rem;
+        }
+        .accordion-trigger {
+            width: 100%; background: var(--muted-bg); border: none;
+            color: var(--foreground); padding: 0.75rem 1rem;
+            font-family: var(--font); font-size: 0.85rem; font-weight: 500;
+            cursor: pointer; display: flex; align-items: center;
+            justify-content: space-between; transition: background 0.15s;
+        }
+        .accordion-trigger:hover { background: #1f1f23; }
+        .accordion-trigger .chevron { transition: transform 0.2s; font-size: 0.75rem; }
+        .accordion-trigger.open .chevron { transform: rotate(180deg); }
+        .accordion-content {
+            display: none; padding: 1rem; font-size: 0.85rem;
+            color: var(--muted); line-height: 1.7;
+            border-top: 1px solid var(--card-border);
+        }
+        .accordion-content.open { display: block; }
+        .accordion-content strong { color: var(--foreground); }
+        .accordion-content ul { margin: 0.5rem 0 0.5rem 1.25rem; }
+
+        /* ─── Footer ─── */
+        .footer {
+            text-align: center; color: var(--muted); font-size: 0.75rem;
+            margin-top: 2rem; padding-top: 1rem;
+            border-top: 1px solid var(--card-border);
+        }
+        .footer a { color: var(--muted); text-decoration: none; }
+        .footer a:hover { color: var(--foreground); }
+    </style>
+</head>
+<body>
+
+<div class="container">
+
+    <!-- Header -->
+    <div class="header">
+        <div class="logo"><span>🔥</span><span>Spotter</span></div>
+        <p class="description">AI-Powered Deepfake Detection with Artifact Visualization</p>
+    </div>
+
+    <!-- How it works -->
+    <div class="accordion">
+        <button class="accordion-trigger" onclick="toggleAccordion(this)">
+            <span>ℹ️ &nbsp;How it works</span>
+            <span class="chevron">▼</span>
+        </button>
+        <div class="accordion-content">
+            <strong>Detection Process:</strong>
+            <ul>
+                <li><strong>Face Detection</strong> — Isolates faces from background noise</li>
+                <li><strong>Temporal Analysis</strong> — Analyzes frame sequences with BiGRU</li>
+                <li><strong>Artifact Detection</strong> — EfficientNet-B0 identifies manipulation patterns</li>
+                <li><strong>Visualization</strong> — Heatmaps highlight suspicious regions</li>
+            </ul>
+            <br>
+            <strong>What the heatmap shows:</strong>
+            <ul>
+                <li>🔴 Unnatural facial blending</li>
+                <li>🔴 Mouth/lip-sync inconsistencies</li>
+                <li>🔴 Temporal artifacts across frames</li>
+            </ul>
+        </div>
+    </div>
+
+    <!-- Upload card -->
+    <div class="card" id="upload-card">
+        <div class="card-header">
+            <div class="card-title">Upload</div>
+        </div>
+
+        <div class="upload-zone" id="upload-zone"
+             onclick="document.getElementById('file-input').click()">
+            <div class="upload-icon">📁</div>
+            <p class="upload-text">
+                <strong>Click to upload</strong> or drag and drop<br>
+                MP4, AVI, MOV, WebM
+            </p>
+            <input type="file" id="file-input" accept="video/*">
+        </div>
+
+        <!-- Divider -->
+        <div class="divider">or try a sample</div>
+
+        <!-- Sample videos -->
+        <div class="samples-grid" id="samples-grid">
+            <!-- Populated by JS -->
+        </div>
+
+        <br>
+        <button class="btn btn-primary" id="scan-btn" disabled onclick="startScan()">
+            🔍 Start Scan
+        </button>
+    </div>
+
+    <!-- Loading -->
+    <div class="card">
+        <div class="loading-overlay" id="loading">
+            <div class="spinner"></div>
+            <span class="loading-text">Analyzing video frames...</span>
+        </div>
+    </div>
+
+    <!-- Results -->
+    <div class="results-section" id="results-section">
+        <div class="results-grid">
+            <div class="stat-card">
+                <div class="stat-label">Prediction</div>
+                <div class="stat-value" id="result-label">—</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Confidence</div>
+                <div class="stat-value" id="result-confidence">—</div>
+            </div>
+        </div>
+
+        <div class="card" style="padding: 0; overflow: hidden;">
+            <div class="player-wrapper">
+                <video id="original-video" controls playsinline></video>
+                <video id="diagnostic-video" muted playsinline></video>
+            </div>
+            <div style="padding: 0.75rem;">
+                <div class="toggle-bar">
+                    <span class="toggle-label">🔥 Heatmap Overlay</span>
+                    <button class="toggle-switch active" id="toggle-switch" onclick="toggleHeatmap()">
+                        <span class="knob"></span>
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="footer">
+        Powered by EfficientNet-B0 + BiGRU &nbsp;·&nbsp;
+        <a href="https://github.com/miiidev/Spotter" target="_blank">GitHub</a>
+    </div>
+
+</div>
+
+<script>
+    const uploadZone   = document.getElementById('upload-zone');
+    const fileInput    = document.getElementById('file-input');
+    const scanBtn      = document.getElementById('scan-btn');
+    const loadingEl    = document.getElementById('loading');
+    const resultsEl    = document.getElementById('results-section');
+    const origVideo    = document.getElementById('original-video');
+    const diagVideo    = document.getElementById('diagnostic-video');
+    const toggleSw     = document.getElementById('toggle-switch');
+    const resultLabel  = document.getElementById('result-label');
+    const resultConf   = document.getElementById('result-confidence');
+    const samplesGrid  = document.getElementById('samples-grid');
+
+    let selectedFile = null;
+    let selectedSample = null;
+    let heatmapOn = true;
+
+    // ─── Load samples on page load ───
+    async function loadSamples() {
+        try {
+            const res = await fetch('/api/samples');
+            const data = await res.json();
+
+            if (data.samples.length === 0) {
+                samplesGrid.innerHTML = `
+                    <p style="color: var(--muted); font-size: 0.85rem; grid-column: 1/-1; text-align: center;">
+                        No sample videos found. Add .mp4 files to <code>static/samples/</code>
+                    </p>`;
+                return;
+            }
+
+            samplesGrid.innerHTML = data.samples.map(s => `
+                <div class="sample-card" data-filename="${s.filename}" onclick="selectSample(this, '${s.filename}', '${s.name}')">
+                    <span class="sample-icon">🎬</span>
+                    <div class="sample-info">
+                        <div class="sample-name">${s.name}</div>
+                        <div class="sample-tag">Sample video</div>
+                    </div>
+                </div>
+            `).join('');
+        } catch (e) {
+            console.error('Failed to load samples:', e);
+        }
+    }
+
+    function selectSample(el, filename, name) {
+        // Deselect all
+        document.querySelectorAll('.sample-card').forEach(c => c.classList.remove('selected'));
+        el.classList.add('selected');
+
+        selectedSample = filename;
+        selectedFile = null;
+
+        // Reset upload zone
+        uploadZone.classList.remove('has-file');
+        uploadZone.innerHTML = `
+            <div class="upload-icon">📁</div>
+            <p class="upload-text"><strong>Click to upload</strong> or drag and drop<br>MP4, AVI, MOV, WebM</p>
+            <input type="file" id="file-input" accept="video/*">
+        `;
+        // Re-bind file input
+        document.getElementById('file-input').addEventListener('change', onFileInputChange);
+
+        scanBtn.disabled = false;
+    }
+
+    // ─── Drag & drop ───
+    uploadZone.addEventListener('dragover', e => {
+        e.preventDefault();
+        uploadZone.classList.add('dragover');
+    });
+    uploadZone.addEventListener('dragleave', () => uploadZone.classList.remove('dragover'));
+    uploadZone.addEventListener('drop', e => {
+        e.preventDefault();
+        uploadZone.classList.remove('dragover');
+        if (e.dataTransfer.files.length) {
+            selectedFile = e.dataTransfer.files[0];
+            onFileSelected();
+        }
+    });
+
+    function onFileInputChange() {
+        const fi = document.getElementById('file-input');
+        if (fi.files.length) {
+            selectedFile = fi.files[0];
+            onFileSelected();
+        }
+    }
+    fileInput.addEventListener('change', onFileInputChange);
+
+    function onFileSelected() {
+        // Clear sample selection
+        selectedSample = null;
+        document.querySelectorAll('.sample-card').forEach(c => c.classList.remove('selected'));
+
+        uploadZone.classList.add('has-file');
+        uploadZone.innerHTML = `
+            <div class="file-name">
+                <span class="check">✓</span>
+                <span>${selectedFile.name}</span>
+            </div>
+        `;
+        scanBtn.disabled = false;
+        resultsEl.classList.remove('active');
+    }
+
+    // ─── Scan ───
+    async function startScan() {
+        if (!selectedFile && !selectedSample) return;
+
+        scanBtn.disabled = true;
+        loadingEl.classList.add('active');
+        resultsEl.classList.remove('active');
+
+        let data;
+
+        try {
+            if (selectedSample) {
+                // Use sample endpoint
+                const res = await fetch(`/api/detect-sample?filename=${encodeURIComponent(selectedSample)}`, {
+                    method: 'POST',
+                });
+                data = await res.json();
+            } else {
+                // Upload file
+                const formData = new FormData();
+                formData.append('video', selectedFile);
+                const res = await fetch('/api/detect', { method: 'POST', body: formData });
+                data = await res.json();
+            }
+
+            origVideo.src = data.original_url;
+            diagVideo.src = data.diagnostic_url;
+
+            const isFake = data.label.toUpperCase() === 'FAKE';
+            resultLabel.textContent = data.label;
+            resultLabel.className = `stat-value ${isFake ? 'fake' : 'real'}`;
+            resultConf.textContent = `${data.confidence}%`;
+            resultConf.className = `stat-value ${isFake ? 'fake' : 'real'}`;
+
+            heatmapOn = true;
+            diagVideo.style.opacity = '1';
+            toggleSw.classList.add('active');
+
+            loadingEl.classList.remove('active');
+            resultsEl.classList.add('active');
+
+        } catch (err) {
+            loadingEl.classList.remove('active');
+            alert('Detection failed: ' + err.message);
+        }
+
+        scanBtn.disabled = false;
+    }
+
+    // ─── Video sync ───
+    origVideo.addEventListener('play', () => { diagVideo.currentTime = origVideo.currentTime; diagVideo.play(); });
+    origVideo.addEventListener('pause', () => diagVideo.pause());
+    origVideo.addEventListener('seeked', () => { diagVideo.currentTime = origVideo.currentTime; });
+    origVideo.addEventListener('timeupdate', () => {
+        if (Math.abs(diagVideo.currentTime - origVideo.currentTime) > 0.15)
+            diagVideo.currentTime = origVideo.currentTime;
+    });
+
+    // ─── Toggle ───
+    function toggleHeatmap() {
+        heatmapOn = !heatmapOn;
+        diagVideo.style.opacity = heatmapOn ? '1' : '0';
+        toggleSw.classList.toggle('active', heatmapOn);
+    }
+
+    // ─── Accordion ───
+    function toggleAccordion(trigger) {
+        trigger.classList.toggle('open');
+        trigger.nextElementSibling.classList.toggle('open');
+    }
+
+    // ─── Init ───
+    loadSamples();
+</script>
+
+</body>
+</html>

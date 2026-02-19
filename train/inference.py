@@ -3,7 +3,6 @@ import cv2
 import torch
 import numpy as np
 from train.model import TemporalCNN_GRU
-import gradio as gr
 import tempfile
 import os
 import uuid
@@ -84,73 +83,83 @@ def detect_and_crop_face(frame_rgb):
     
     return cv2.resize(frame_rgb, (IMG_SIZE, IMG_SIZE)), None
 
-# ========================= Frame extraction =========================
-def extract_frames(video_path, num_frames=NUM_FRAMES, size=IMG_SIZE):
+
+# ========================= Video metadata =========================
+def get_video_info(video_path):
+    """Get video metadata without reading frames."""
+    cap = cv2.VideoCapture(video_path)
+    info = {
+        "total_frames": int(cap.get(cv2.CAP_PROP_FRAME_COUNT)),
+        "fps": cap.get(cv2.CAP_PROP_FPS),
+        "width": int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
+        "height": int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)),
+    }
+    cap.release()
+    return info
+
+
+# ========================= Optimized frame extraction =========================
+def extract_analyzed_frames(video_path, num_frames=NUM_FRAMES, size=IMG_SIZE):
     """
-    Extract ALL frames from video for output video.
-    Also extracts and analyzes NUM_FRAMES uniformly sampled frames.
-    
+    Extract ONLY the frames needed for model analysis.
+    Reads the video once, only decodes frames at analyzed indices.
+
     Returns:
         - small_frames: (num_frames, size, size, 3) - cropped faces for model input
-        - full_frames: (total_frames, H, W, 3) - all full frames for output
-        - all_face_boxes: list of face boxes for all frames
+        - analyzed_face_boxes: list of face boxes for analyzed frames
         - analyzed_indices: indices of frames that were analyzed
+        - video_info: dict with total_frames, fps, width, height
     """
-    cap = cv2.VideoCapture(video_path)
-    all_frames = []
-    all_face_boxes = []
-    
-    if not cap.isOpened():
-        black = np.zeros((size, size, 3), dtype=np.uint8)
-        return (np.stack([black] * num_frames), 
-                np.stack([black] * num_frames), 
-                [None] * num_frames, 
-                np.array([0]))
-    
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    
+    info = get_video_info(video_path)
+    total_frames = info["total_frames"]
+
     if total_frames == 0:
         black = np.zeros((size, size, 3), dtype=np.uint8)
-        return (np.stack([black] * num_frames), 
-                np.stack([black] * num_frames), 
-                [None] * num_frames, 
-                np.array([0]))
-    
-    # Read ALL frames from video
-    print(f"📹 Extracting {total_frames} frames from video...")
-    frame_count = 0
-    while True:
-        ret, frame = cap.read()
+        return (np.stack([black] * num_frames),
+                [None] * num_frames,
+                np.array([0]),
+                info)
+
+    # Calculate which frames to analyze
+    analyzed_indices = np.linspace(0, total_frames - 1, num_frames).astype(int)
+    target_set = set(analyzed_indices.tolist())
+
+    cap = cv2.VideoCapture(video_path)
+    small_frames = []
+    analyzed_face_boxes = []
+    current_idx = 0
+    next_target = 0  # pointer into analyzed_indices
+
+    while next_target < len(analyzed_indices) and cap.isOpened():
+        ret = cap.grab()  # grab() is faster — only decodes header
         if not ret:
             break
-        
-        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        face_cropped, face_box = detect_and_crop_face(frame_rgb)
-        
-        all_frames.append(frame_rgb)
-        all_face_boxes.append(face_box)
-        frame_count += 1
-    
+
+        if current_idx == analyzed_indices[next_target]:
+            ret, frame = cap.retrieve()  # only fully decode frames we need
+            if ret:
+                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                face_cropped, face_box = detect_and_crop_face(frame_rgb)
+                small_frames.append(face_cropped)
+                analyzed_face_boxes.append(face_box)
+            next_target += 1
+
+        current_idx += 1
+
     cap.release()
-    
-    print(f"✅ Extracted {frame_count} frames")
-    
-    # Sample NUM_FRAMES uniformly for analysis
-    analyzed_indices = np.linspace(0, len(all_frames) - 1, num_frames).astype(int)
-    analyzed_frames = np.stack([all_frames[i] for i in analyzed_indices])
-    
-    # Convert cropped faces to same size
-    small_frames = []
-    for i in analyzed_indices:
-        _, face_box = detect_and_crop_face(all_frames[i])
-        frame_rgb = cv2.cvtColor(cv2.cvtColor(all_frames[i], cv2.COLOR_RGB2BGR), cv2.COLOR_BGR2RGB)
-        face_cropped, _ = detect_and_crop_face(frame_rgb)
-        small_frames.append(face_cropped)
-    
-    small_frames = np.stack(small_frames)
-    full_frames = np.stack(all_frames)
-    
-    return small_frames, full_frames, all_face_boxes, analyzed_indices
+
+    # Handle edge case where we got fewer frames than expected
+    while len(small_frames) < num_frames:
+        small_frames.append(np.zeros((size, size, 3), dtype=np.uint8))
+        analyzed_face_boxes.append(None)
+
+    print(f"✅ Extracted {len(small_frames)} analyzed frames (skipped {total_frames - len(small_frames)})")
+
+    return (np.stack(small_frames),
+            analyzed_face_boxes,
+            analyzed_indices,
+            info)
+
 
 # ========================= Temporal-Aware Grad-CAM =========================
 class TemporalGradCAM:
@@ -260,27 +269,13 @@ gradcam = TemporalGradCAM(model, target_layer)
 def interpolate_scores(fake_scores, analyzed_indices, total_frames):
     """
     Interpolate fake scores for all frames using linear interpolation.
-    
-    Args:
-        fake_scores: (num_analyzed,) - scores for analyzed frames
-        analyzed_indices: (num_analyzed,) - indices of analyzed frames
-        total_frames: total number of frames in video
-    
-    Returns:
-        interpolated_scores: (total_frames,) - scores for all frames
     """
     if len(analyzed_indices) == 1:
-        # If only one frame analyzed, use its score for all frames
         return np.full(total_frames, fake_scores[0])
     
-    # Create interpolation function
     f = interp1d(analyzed_indices, fake_scores, kind='linear', fill_value='extrapolate')
-    
-    # Generate scores for all frames
     all_frame_indices = np.arange(total_frames)
     interpolated_scores = f(all_frame_indices)
-    
-    # Clip to valid range [0, 1]
     interpolated_scores = np.clip(interpolated_scores, 0, 1)
     
     return interpolated_scores
@@ -289,25 +284,12 @@ def interpolate_scores(fake_scores, analyzed_indices, total_frames):
 def interpolate_heatmaps(heatmaps, analyzed_indices, total_frames):
     """
     Interpolate heatmaps for all frames using nearest-neighbor.
-    Each non-analyzed frame gets the heatmap from its nearest analyzed frame.
-    
-    Args:
-        heatmaps: (num_analyzed, H, W) - heatmaps for analyzed frames
-        analyzed_indices: (num_analyzed,) - indices of analyzed frames
-        total_frames: total number of frames in video
-    
-    Returns:
-        all_heatmaps: (total_frames, H, W) - heatmaps for all frames
     """
-    num_analyzed = len(analyzed_indices)
     h, w = heatmaps[0].shape
     all_heatmaps = np.zeros((total_frames, h, w))
     
     for frame_idx in range(total_frames):
-        # Find nearest analyzed frame index
         nearest_pos = np.argmin(np.abs(analyzed_indices - frame_idx))
-        
-        # Use heatmap from nearest analyzed frame
         all_heatmaps[frame_idx] = heatmaps[nearest_pos]
     
     return all_heatmaps
@@ -323,53 +305,67 @@ def aggregate_frame_scores(fake_scores, threshold=0.5):
     else:
         return "REAL", float(1 - mean_score)
 
-# ========================= Diagnostics =========================
-def frame_level_diagnostics(video_path):
+# ========================= Optimized diagnostics =========================
+def analyze_video(video_path):
     """
-    Extract frames and compute temporal-aware heatmaps.
-    Returns heatmaps interpolated for ALL frames.
+    Step 1: Extract only the frames needed for model analysis,
+    run the model, and return lightweight analysis results.
+    Does NOT generate any video yet.
+
+    Returns:
+        analysis dict with: label, confidence, fake_scores,
+        heatmaps, analyzed_indices, video_info
     """
-    small_frames, full_frames, all_face_boxes, analyzed_indices = extract_frames(video_path)
-    
+    small_frames, analyzed_face_boxes, analyzed_indices, video_info = \
+        extract_analyzed_frames(video_path)
+
     # Prepare tensor (normalize with ImageNet stats)
     frames_tensor = torch.from_numpy(
         small_frames.astype(np.float32) / 255.0
     ).permute(0, 3, 1, 2).unsqueeze(0).to(DEVICE)  # (1, T, C, H, W)
-    
-    # Normalize
+
     mean = torch.tensor([0.485, 0.456, 0.406], device=DEVICE).view(1, 1, 3, 1, 1)
     std = torch.tensor([0.229, 0.224, 0.225], device=DEVICE).view(1, 1, 3, 1, 1)
     frames_tensor = (frames_tensor - mean) / std
-    
-    # Generate heatmaps using temporal model
-    # Predict class first
+
+    # Predict class
     with torch.no_grad():
         logits = model(frames_tensor)
         pred_class = logits.argmax(dim=1).item()
-    
+
+    # Generate heatmaps for analyzed frames only
     analyzed_heatmaps, analyzed_fake_scores = gradcam.generate_heatmaps(
         frames_tensor, target_class=pred_class
     )
-    
-    # Interpolate to get heatmaps and scores for ALL frames
-    total_frames = len(full_frames)
+
+    # Interpolate to all frames
+    total_frames = video_info["total_frames"]
     all_heatmaps = interpolate_heatmaps(analyzed_heatmaps, analyzed_indices, total_frames)
     all_fake_scores = interpolate_scores(analyzed_fake_scores, analyzed_indices, total_frames)
-    
-    print(f"🎬 Generated diagnostics for {total_frames} frames (analyzed {len(analyzed_indices)})")
-    
-    return full_frames, small_frames, all_fake_scores, all_heatmaps, all_face_boxes
+
+    label, confidence = aggregate_frame_scores(all_fake_scores)
+
+    print(f"🎬 Analysis complete: {label} ({confidence:.1%}) — "
+          f"analyzed {len(analyzed_indices)}/{total_frames} frames")
+
+    return {
+        "label": label,
+        "confidence": confidence,
+        "fake_scores": all_fake_scores,
+        "heatmaps": all_heatmaps,
+        "analyzed_indices": analyzed_indices,
+        "video_info": video_info,
+    }
+
 
 # ========================= Video writer =========================
 def create_pixelated_heatmap(heatmap, grid_size=12):
     """
     Create a pixelated/blocky heatmap - FINER grid for EfficientNet.
-    EfficientNet gives better spatial resolution, so we can use smaller blocks!
     """
     h, w = heatmap.shape
     pixelated = np.zeros_like(heatmap)
     
-    # Divide into grid cells and take max value in each cell
     for i in range(0, h, grid_size):
         for j in range(0, w, grid_size):
             cell = heatmap[i:i+grid_size, j:j+grid_size]
@@ -382,33 +378,21 @@ def create_pixelated_heatmap(heatmap, grid_size=12):
 def overlay_heatmap(frame_bgr, heatmap, alpha, threshold=0.3, grid_size=12):
     """
     Overlay pixelated heatmap on frame with threshold for artifact highlighting.
-    Lower threshold for EfficientNet (more sensitive to artifacts).
     """
-    # Resize heatmap to match frame
     heatmap_resized = cv2.resize(heatmap, (frame_bgr.shape[1], frame_bgr.shape[0]))
-    
-    # Create pixelated version
     pixelated_heatmap = create_pixelated_heatmap(heatmap_resized, grid_size=grid_size)
-    
-    # Apply threshold - only show high-confidence artifact regions
     mask = pixelated_heatmap > threshold
     
-    # Create colored heatmap (red for artifacts)
     heatmap_colored = np.zeros_like(frame_bgr)
-    heatmap_colored[:, :, 2] = (pixelated_heatmap * 255).astype(np.uint8)  # Red channel
-    heatmap_colored[:, :, 0] = ((1 - pixelated_heatmap) * 100).astype(np.uint8)  # Blue channel (slight)
+    heatmap_colored[:, :, 2] = (pixelated_heatmap * 255).astype(np.uint8)
+    heatmap_colored[:, :, 0] = ((1 - pixelated_heatmap) * 100).astype(np.uint8)
     
-    # Only overlay where mask is true
     result = frame_bgr.copy()
     result[mask] = cv2.addWeighted(
-        frame_bgr[mask], 
-        1 - alpha, 
-        heatmap_colored[mask], 
-        alpha, 
-        0
+        frame_bgr[mask], 1 - alpha,
+        heatmap_colored[mask], alpha, 0
     )
     
-    # Add grid lines for pixelated effect
     overlay_grid = result.copy()
     for i in range(0, frame_bgr.shape[0], grid_size):
         if mask[min(i, mask.shape[0]-1), :].any():
@@ -417,168 +401,137 @@ def overlay_heatmap(frame_bgr, heatmap, alpha, threshold=0.3, grid_size=12):
         if mask[:, min(j, mask.shape[1]-1)].any():
             cv2.line(overlay_grid, (j, 0), (j, frame_bgr.shape[0]), (255, 255, 255), 1)
     
-    # Blend grid lines
     result = cv2.addWeighted(result, 0.85, overlay_grid, 0.15, 0)
-    
     return result
 
-def generate_diagnostic_video(full_frames, face_frames, fake_scores, heatmaps, face_boxes, fps=FPS):
+
+def generate_diagnostic_video_lazy(video_path, fake_scores, heatmaps, fps=FPS):
     """
-    Generate diagnostic video with ALL frames from original video.
-    Uses interpolated heatmaps and scores for non-analyzed frames.
+    Generate diagnostic video by re-reading the original video lazily.
+    Processes one frame at a time — never stores all frames in RAM.
+    Uses face tracking to reduce MTCNN calls.
     """
     out_path = os.path.join(
         tempfile.gettempdir(),
         f"diagnostic_{uuid.uuid4().hex}.mp4"
     )
 
-    h, w, _ = full_frames[0].shape
+    cap = cv2.VideoCapture(video_path)
+    w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    video_fps = cap.get(cv2.CAP_PROP_FPS) or fps
+
     writer = cv2.VideoWriter(
         out_path,
-        cv2.VideoWriter_fourcc(*"mp4v"),
-        fps,
+        cv2.VideoWriter_fourcc(*"avc1"),
+        video_fps,
         (w, h)
     )
 
-    total_frames = len(full_frames)
-    print(f"🎬 Writing diagnostic video with {total_frames} frames at {fps} FPS...")
+    print(f"🎬 Writing diagnostic video: {total_frames} frames at {video_fps:.0f} FPS...")
 
-    for frame_idx, (full_frame, score, heatmap, face_box) in enumerate(
-        zip(full_frames, fake_scores, heatmaps, face_boxes)
-    ):
-        if (frame_idx + 1) % max(1, total_frames // 10) == 0:
-            print(f"   Processing frame {frame_idx + 1}/{total_frames}...")
+    # Face tracking: detect every N frames, reuse box between detections
+    face_detect_interval = max(1, int(video_fps // 6))  # ~6 detections per second
+    cached_face_box = None
 
-        frame_bgr = cv2.cvtColor(full_frame, cv2.COLOR_RGB2BGR)
-        
-        # If we have face box, overlay heatmap on the face region
+    for frame_idx in range(total_frames):
+        ret, frame = cap.read()
+        if not ret:
+            break
+
+        frame_bgr = frame  # already BGR from cap.read()
+
+        # Face detection with tracking (only run MTCNN periodically)
+        if frame_idx % face_detect_interval == 0:
+            frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+            _, cached_face_box = detect_and_crop_face(frame_rgb)
+
+        score = fake_scores[frame_idx] if frame_idx < len(fake_scores) else 0.0
+        heatmap = heatmaps[frame_idx] if frame_idx < len(heatmaps) else np.zeros((7, 7))
+        face_box = cached_face_box
+
+        # Overlay heatmap on face region or full frame
         if face_box is not None:
             x1, y1, x2, y2 = face_box
             face_w, face_h = x2 - x1, y2 - y1
-            
-            # Resize heatmap to face region
-            heatmap_resized = cv2.resize(heatmap, (face_w, face_h))
-            
-            # Create face region overlay
-            face_region = frame_bgr[y1:y2, x1:x2].copy()
-            
-            # Dynamic alpha and grid size
-            alpha = float(np.clip(score * 0.7, 0.2, 0.6))
-            grid_size = max(6, min(16, face_h // 18))  # Finer grid for EfficientNet
-            
-            # Apply pixelated heatmap to face region
-            face_region = overlay_heatmap(face_region, heatmap_resized, alpha, threshold=0.3, grid_size=grid_size)
-            
-            # Put back into full frame
-            frame_bgr[y1:y2, x1:x2] = face_region
-            
-            # Draw face box
-            cv2.rectangle(frame_bgr, (x1, y1), (x2, y2), (0, 255, 255), 2)
+
+            if face_w > 0 and face_h > 0:
+                heatmap_resized = cv2.resize(heatmap, (face_w, face_h))
+                face_region = frame_bgr[y1:y2, x1:x2].copy()
+
+                alpha = float(np.clip(score * 0.7, 0.2, 0.6))
+                grid_size = max(6, min(16, face_h // 18))
+
+                face_region = overlay_heatmap(
+                    face_region, heatmap_resized, alpha,
+                    threshold=0.3, grid_size=grid_size
+                )
+                frame_bgr[y1:y2, x1:x2] = face_region
+                cv2.rectangle(frame_bgr, (x1, y1), (x2, y2), (0, 255, 255), 2)
         else:
-            # No face detected, show heatmap on whole frame (fallback)
             alpha = float(np.clip(score * 0.7, 0.2, 0.6))
             grid_size = max(8, min(24, h // 20))
-            frame_bgr = overlay_heatmap(frame_bgr, heatmap, alpha, threshold=0.3, grid_size=grid_size)
+            frame_bgr = overlay_heatmap(
+                frame_bgr, heatmap, alpha,
+                threshold=0.3, grid_size=grid_size
+            )
 
-        # Add info overlay
+        # Info overlay
         overlay_bg = frame_bgr.copy()
         cv2.rectangle(overlay_bg, (5, 5), (380, 110), (0, 0, 0), -1)
         frame_bgr = cv2.addWeighted(frame_bgr, 0.7, overlay_bg, 0.3, 0)
-        
-        # Add text info
+
         cv2.putText(frame_bgr, f"Frame: {frame_idx + 1}/{total_frames}", (10, 25),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-        
         cv2.putText(frame_bgr, f"Fake Confidence: {score:.1%}", (10, 50),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6,
                     (0, 255, 255) if score < 0.5 else (0, 100, 255), 2)
-        
+
         face_status = "Face Detected ✓" if face_box is not None else "No Face (Fallback)"
         cv2.putText(frame_bgr, face_status, (10, 75),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6,
                     (0, 255, 0) if face_box is not None else (0, 165, 255), 2)
-        
-        # Count artifact pixels
-        if face_box is not None:
-            heatmap_resized = cv2.resize(heatmap, (x2-x1, y2-y1))
+
+        if face_box is not None and (x2 - x1) > 0 and (y2 - y1) > 0:
+            hm = cv2.resize(heatmap, (x2 - x1, y2 - y1))
         else:
-            heatmap_resized = cv2.resize(heatmap, (w, h))
-            
-        artifact_pixels = (heatmap_resized > 0.3).sum()
-        total_pixels = heatmap_resized.size
-        artifact_pct = (artifact_pixels / total_pixels) * 100
-        
+            hm = cv2.resize(heatmap, (w, h))
+        artifact_pct = ((hm > 0.3).sum() / hm.size) * 100
         cv2.putText(frame_bgr, f"Artifact Regions: {artifact_pct:.1f}%", (10, 100),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
 
         writer.write(frame_bgr)
 
+        if (frame_idx + 1) % max(1, total_frames // 10) == 0:
+            print(f"   Processing frame {frame_idx + 1}/{total_frames}...")
+
+    cap.release()
     writer.release()
     print(f"✅ Diagnostic video saved to {out_path}")
     return out_path
 
-# ========================= Prediction =========================
+
+# ========================= Main prediction entry point =========================
 def predict_with_diagnostics(video_path):
     """
-    Run detection with full-duration diagnostic video.
+    Run detection with optimized lazy diagnostic video generation.
+    Returns both the original video path and the diagnostic video path.
     """
-    full_frames, face_frames, fake_scores, heatmaps, face_boxes = frame_level_diagnostics(video_path)
+    # Step 1: Analyze only 24 frames (fast, low memory)
+    analysis = analyze_video(video_path)
 
-    label, confidence = aggregate_frame_scores(fake_scores)
-    diag_video = generate_diagnostic_video(full_frames, face_frames, fake_scores, heatmaps, face_boxes)
+    # Step 2: Lazily generate diagnostic video (re-reads original, 1 frame at a time)
+    diag_video = generate_diagnostic_video_lazy(
+        video_path,
+        analysis["fake_scores"],
+        analysis["heatmaps"],
+    )
 
     return {
-        "label": label,
-        "confidence": confidence,
+        "label": analysis["label"],
+        "confidence": analysis["confidence"],
         "diagnostic_video": diag_video,
-        "frame_scores": fake_scores
+        "original_video": video_path,
+        "frame_scores": analysis["fake_scores"],
     }
-
-# ========================= Gradio wrapper =========================
-def gradio_predict(video):
-    if video is None:
-        return "No video uploaded", 0.0, None
-
-    result = predict_with_diagnostics(video)
-    return result["label"], result["confidence"], result["diagnostic_video"]
-
-# ========================= UI =========================
-if __name__ == "__main__":
-    with gr.Blocks(title="Deepfake Detection", theme=gr.themes.Soft()) as demo:
-        gr.Markdown("## 🎭 EfficientNet-B0 Temporal Deepfake Detection")
-        gr.Markdown("Enhanced with **better spatial resolution** for precise artifact localization!")
-
-        with gr.Row():
-            with gr.Column():
-                video_input = gr.Video(label="Upload Video")
-                detect_btn = gr.Button("🔍 Run Detection", variant="primary")
-            
-            with gr.Column():
-                video_output = gr.Video(label="Diagnostic Output with Heatmaps")
-
-        with gr.Row():
-            label_output = gr.Textbox(label="Prediction", scale=1)
-            confidence_output = gr.Number(label="Confidence Score", scale=1)
-
-        detect_btn.click(
-            fn=gradio_predict,
-            inputs=video_input,
-            outputs=[label_output, confidence_output, video_output]
-        )
-        
-        gr.Markdown("""
-        ### 🚀 Improvements with EfficientNet-B0:
-        - **Better accuracy**: ~3-5% boost over ResNet18
-        - **Higher resolution heatmaps**: 7x7 vs 7x7 (or better with multi-scale)
-        - **More precise artifact detection**: Finer grid, better localization
-        - **Efficient**: Optimized for mobile/edge deployment
-        
-        ### 📊 How it works:
-        - **EfficientNet-B0**: Efficient CNN backbone (1280 features)
-        - **BiGRU**: Captures temporal patterns across frames  
-        - **Temporal Grad-CAM**: Context-aware heatmaps highlighting manipulation artifacts
-        - **Face-focused**: Only analyzes detected faces, ignoring backgrounds
-        - **Full-duration diagnostics**: Heatmaps interpolated for every frame in the video
-        """)
-
-    demo.launch()
