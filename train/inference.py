@@ -11,22 +11,40 @@ from scipy.interpolate import interp1d
 
 # ========================= CONFIG =========================
 NUM_FRAMES = 24
-IMG_SIZE = 224
+IMG_SIZE = 300  # Upgraded from 224 to 300 for EfficientNet-B3
 MODEL_PATH = "checkpoints/spotter_v1.pth"
 FPS = 24
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # ========================= Load model =========================
-model = TemporalCNN_GRU(num_classes=2)
-checkpoint = torch.load(MODEL_PATH, map_location=DEVICE)
-# Handle both direct state_dict and training checkpoint formats
-if 'model' in checkpoint:
-    model.load_state_dict(checkpoint['model'])
-    print(f"✅ Loaded checkpoint from epoch {checkpoint.get('epoch', 'unknown')}")
-else:
-    model.load_state_dict(checkpoint)
-    print("✅ Loaded model weights")
+# Try to load with B3 first, fallback to B0 if needed
+try:
+    model = TemporalCNN_GRU(num_classes=2, backbone='efficientnet-b3', use_multiscale=True)
+    checkpoint = torch.load(MODEL_PATH, map_location=DEVICE)
+    # Handle both direct state_dict and training checkpoint formats
+    if 'model' in checkpoint:
+        model.load_state_dict(checkpoint['model'])
+        print(f"✅ Loaded EfficientNet-B3 checkpoint from epoch {checkpoint.get('epoch', 'unknown')}")
+    else:
+        model.load_state_dict(checkpoint)
+        print("✅ Loaded EfficientNet-B3 model weights")
+    USE_B3 = True
+except Exception as e:
+    print(f"⚠️  Could not load B3 model ({str(e)}), falling back to B0...")
+    model = TemporalCNN_GRU(num_classes=2, backbone='efficientnet-b0', use_multiscale=False)
+    checkpoint = torch.load(MODEL_PATH, map_location=DEVICE)
+    if 'model' in checkpoint:
+        # Use strict=False for backward compatibility with older checkpoints
+        # that may not have spatial attention or multi-scale components
+        model.load_state_dict(checkpoint['model'], strict=False)
+        print(f"✅ Loaded EfficientNet-B0 checkpoint from epoch {checkpoint.get('epoch', 'unknown')}")
+    else:
+        model.load_state_dict(checkpoint, strict=False)
+        print("✅ Loaded EfficientNet-B0 model weights")
+    USE_B3 = False
+    IMG_SIZE = 224  # Use B0 size
+
 model.to(DEVICE)
 model.eval()
 
@@ -161,39 +179,94 @@ def extract_analyzed_frames(video_path, num_frames=NUM_FRAMES, size=IMG_SIZE):
             info)
 
 
-# ========================= Temporal-Aware Grad-CAM =========================
-class TemporalGradCAM:
+# ========================= Multi-Scale Grad-CAM =========================
+class MultiScaleGradCAM:
     """
-    Grad-CAM that hooks into CNN backbone while running the full temporal model.
-    Optimized for EfficientNet backbone.
+    Multi-scale Grad-CAM that combines heatmaps from multiple layers.
+    Provides better spatial resolution and artifact detection.
     """
-    def __init__(self, model, target_layer):
+    def __init__(self, model, use_multiscale=True):
         self.model = model
-        self.target_layer = target_layer
-        self.activations = None
-        self.gradients = None
+        self.use_multiscale = use_multiscale
+        
+        # Get layers for hooking
+        if use_multiscale and hasattr(model, 'get_multiscale_layers'):
+            self.layers = model.get_multiscale_layers()
+        else:
+            # Fallback to single layer
+            self.layers = {'semantic': model.get_feature_extractor_layer('final')}
+        
+        # Store activations and gradients for each scale
+        self.activations = {}
+        self.gradients = {}
         self._register_hooks()
     
     def _register_hooks(self):
-        def forward_hook(module, input, output):
-            self.activations = output.detach()
+        """Register forward and backward hooks for all target layers"""
+        def create_forward_hook(name):
+            def hook(module, input, output):
+                self.activations[name] = output.detach()
+            return hook
         
-        def backward_hook(module, grad_input, grad_output):
-            self.gradients = grad_output[0].detach()
+        def create_backward_hook(name):
+            def hook(module, grad_input, grad_output):
+                self.gradients[name] = grad_output[0].detach()
+            return hook
         
-        self.target_layer.register_forward_hook(forward_hook)
-        self.target_layer.register_full_backward_hook(backward_hook)
+        for name, layer in self.layers.items():
+            layer.register_forward_hook(create_forward_hook(name))
+            layer.register_full_backward_hook(create_backward_hook(name))
+    
+    def _compute_cam_for_layer(self, name, B, T):
+        """Compute CAM for a specific layer"""
+        if name not in self.activations or name not in self.gradients:
+            return None
+        
+        activations = self.activations[name]
+        gradients = self.gradients[name]
+        
+        num_channels = activations.shape[1]
+        h, w = activations.shape[2:]
+        
+        # Reshape to separate batch and time
+        activations = activations.view(B, T, num_channels, h, w)
+        gradients = gradients.view(B, T, num_channels, h, w)
+        
+        heatmaps = []
+        
+        for t in range(T):
+            # Get activations and gradients for this frame
+            act = activations[0, t]  # (C, H, W)
+            grad = gradients[0, t]   # (C, H, W)
+            
+            # Compute weights (global average pooling of gradients)
+            weights = grad.mean(dim=(1, 2))  # (C,)
+            
+            # Weighted combination of activation maps
+            cam = torch.zeros((h, w), device=act.device)
+            for i in range(num_channels):
+                cam += weights[i] * act[i]
+            
+            # ReLU and normalize
+            cam = torch.relu(cam)
+            cam = cam - cam.min()
+            if cam.max() > 0:
+                cam = cam / cam.max()
+            
+            heatmaps.append(cam.cpu().numpy())
+        
+        return np.stack(heatmaps), (h, w)
     
     def generate_heatmaps(self, video_tensor, target_class):
         """
-        Generate per-frame heatmaps using the FULL temporal model.
+        Generate per-frame heatmaps using multi-scale approach.
         
         Args:
             video_tensor: (1, T, C, H, W) - batch of frames
             target_class: which class to compute CAM for (0=real, 1=fake)
         
         Returns:
-            heatmaps: (T, H, W) - one heatmap per frame
+            heatmaps: (T, H, W) - fused multi-scale heatmaps
             frame_scores: (T,) - per-frame fake probability
         """
         self.model.zero_grad()
@@ -208,42 +281,52 @@ class TemporalGradCAM:
         # Backward to get gradients
         score.backward(retain_graph=True)
         
-        # EfficientNet feature maps are larger than ResNet!
-        # Activations shape: (B*T, C, H, W) where H,W are larger (e.g., 7x7 or higher)
         B, T, _ = temporal_out.shape
-        num_channels = self.activations.shape[1]
-        h, w = self.activations.shape[2:]
         
-        print(f"[DEBUG] Grad-CAM resolution: {h}x{w} (EfficientNet advantage!)")
+        # Generate CAM at each scale
+        scale_heatmaps = {}
+        max_h, max_w = 0, 0
         
-        # Reshape activations and gradients to separate batch and time
-        activations = self.activations.view(B, T, num_channels, h, w)
-        gradients = self.gradients.view(B, T, num_channels, h, w)
+        for scale_name in self.layers.keys():
+            result = self._compute_cam_for_layer(scale_name, B, T)
+            if result is not None:
+                heatmaps, (h, w) = result
+                scale_heatmaps[scale_name] = heatmaps
+                max_h, max_w = max(max_h, h), max(max_w, w)
+                print(f"[DEBUG] {scale_name} Grad-CAM resolution: {h}x{w}")
         
-        heatmaps = []
-        
-        for t in range(T):
-            # Get activations and gradients for this frame
-            act = activations[0, t]      # (C, H, W)
-            grad = gradients[0, t]       # (C, H, W)
+        # Fuse multi-scale heatmaps with learned weights
+        if len(scale_heatmaps) > 1:
+            # Weights: fine=0.3, mid=0.3, semantic=0.4
+            weights = {
+                'fine': 0.3,
+                'mid': 0.3,
+                'semantic': 0.4
+            }
             
-            # Compute weights (global average pooling of gradients)
-            weights = grad.mean(dim=(1, 2))  # (C,)
+            fused_heatmaps = []
+            for t in range(T):
+                fused = np.zeros((max_h, max_w))
+                total_weight = 0.0
+                
+                for scale_name, heatmaps in scale_heatmaps.items():
+                    weight = weights.get(scale_name, 1.0 / len(scale_heatmaps))
+                    # Resize to target size
+                    resized = cv2.resize(heatmaps[t], (max_w, max_h))
+                    fused += weight * resized
+                    total_weight += weight
+                
+                if total_weight > 0:
+                    fused /= total_weight
+                
+                fused_heatmaps.append(fused)
             
-            # Weighted combination of activation maps
-            cam = torch.zeros((h, w), device=DEVICE)
-            for i in range(num_channels):
-                cam += weights[i] * act[i]
-            
-            # ReLU and normalize
-            cam = torch.relu(cam)
-            cam = cam - cam.min()
-            if cam.max() > 0:
-                cam = cam / cam.max()
-            
-            heatmaps.append(cam.cpu().numpy())
+            final_heatmaps = np.stack(fused_heatmaps)
+        else:
+            # Single scale - just use it directly
+            final_heatmaps = list(scale_heatmaps.values())[0]
         
-        # Also compute per-frame fake scores using temporal features
+        # Compute per-frame fake scores using temporal features
         with torch.no_grad():
             fake_scores_list = []
             
@@ -260,10 +343,10 @@ class TemporalGradCAM:
             
             fake_scores = np.array(fake_scores_list)
         
-        return np.stack(heatmaps), fake_scores
+        return final_heatmaps, fake_scores
 
-# Initialize Grad-CAM
-gradcam = TemporalGradCAM(model, target_layer)
+# Initialize Grad-CAM with multi-scale support
+gradcam = MultiScaleGradCAM(model, use_multiscale=USE_B3)
 
 # ========================= Interpolation functions =========================
 def interpolate_scores(fake_scores, analyzed_indices, total_frames):
