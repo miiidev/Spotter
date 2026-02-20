@@ -8,6 +8,7 @@ import os
 import uuid
 from facenet_pytorch import MTCNN
 from scipy.interpolate import interp1d
+import subprocess
 
 # ========================= CONFIG =========================
 NUM_FRAMES = 24
@@ -411,6 +412,10 @@ def generate_diagnostic_video_lazy(video_path, fake_scores, heatmaps, fps=FPS):
     Processes one frame at a time — never stores all frames in RAM.
     Uses face tracking to reduce MTCNN calls.
     """
+    temp_path = os.path.join(
+        tempfile.gettempdir(),
+        f"diagnostic_raw_{uuid.uuid4().hex}.mp4"
+    )
     out_path = os.path.join(
         tempfile.gettempdir(),
         f"diagnostic_{uuid.uuid4().hex}.mp4"
@@ -423,8 +428,8 @@ def generate_diagnostic_video_lazy(video_path, fake_scores, heatmaps, fps=FPS):
     video_fps = cap.get(cv2.CAP_PROP_FPS) or fps
 
     writer = cv2.VideoWriter(
-        out_path,
-        cv2.VideoWriter_fourcc(*"avc1"),
+        temp_path,
+        cv2.VideoWriter_fourcc(*"mp4v"),
         video_fps,
         (w, h)
     )
@@ -508,6 +513,21 @@ def generate_diagnostic_video_lazy(video_path, fake_scores, heatmaps, fps=FPS):
 
     cap.release()
     writer.release()
+
+    subprocess.run([
+        "ffmpeg", "-y",
+        "-i", temp_path,
+        "-vcodec", "libx264",
+        "-preset", "fast",
+        "-crf", "23",
+        "-movflags", "+faststart",
+        out_path
+    ], capture_output=True)
+
+    # Clean up temp file
+    if os.path.exists(temp_path):
+        os.remove(temp_path)
+    
     print(f"✅ Diagnostic video saved to {out_path}")
     return out_path
 
